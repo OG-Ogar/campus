@@ -1,0 +1,376 @@
+source code 
+"""Learn2Earn Equipment Lending System (standard library only)."""
+import json
+import os
+import sys
+
+DATA_FILE = "learn2earn_data.json"
+LOW_STOCK_LIMIT = 3
+
+resources = [
+    {"id": "R001", "name": "Laptop", "category": "Electronics", "total": 10, "available": 10},
+    {"id": "R002", "name": "Keyboard", "category": "Accessories", "total": 5, "available": 5},
+    {"id": "R003", "name": "Headset", "category": "Accessories", "total": 3, "available": 3},
+]
+fellows = {"F001": "Ada", "F002": "John", "F003": "Grace"}
+# Each record: {"record_id", "fellow_id", "resource_id", "quantity", "returned"}
+borrow_records = []
+
+
+# ---------- helpers ----------
+def find_resource(resource_id):
+    for r in resources:
+        if r["id"] == resource_id:
+            return r
+    return None
+
+
+def parse_positive_int(text):
+    """Return a positive int, or None if text is not one (rejects 2.5, abc, 0, -1)."""
+    try:
+        value = int(str(text).strip())
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def outstanding(fellow_id, resource_id):
+    """Units this fellow currently has on loan for this resource."""
+    return sum(rec["quantity"] - rec["returned"]
+               for rec in borrow_records
+               if rec["fellow_id"] == fellow_id and rec["resource_id"] == resource_id)
+
+
+# ---------- inventory ----------
+def add_resource(resource_id, name, category, total):
+    resource_id, name, category = resource_id.strip(), name.strip(), category.strip()
+    if not resource_id or not name or not category:
+        return False, "ID, name and category cannot be empty."
+    if find_resource(resource_id):
+        return False, f"Resource ID {resource_id} already exists."
+    total = parse_positive_int(total)
+    if total is None:
+        return False, "Total units must be a positive whole number."
+    resources.append({"id": resource_id, "name": name, "category": category,
+                      "total": total, "available": total})
+    return True, f"Added {name} ({resource_id}) with {total} units."
+
+
+def format_resource(r):
+    return (f"{r['id']:<6} {r['name']:<12} {r['category']:<12} "
+            f"total={r['total']:<3} available={r['available']}")
+
+
+def list_resources(items=None):
+    items = resources if items is None else items
+    if not items:
+        print("  (no resources found)")
+    for r in items:
+        print("  " + format_resource(r))
+
+
+# ---------- borrowing and returns ----------
+def borrow(fellow_id, resource_id, quantity):
+    """Validate everything first; only then change state."""
+    if fellow_id not in fellows:
+        return False, f"Unknown fellow ID: {fellow_id}"
+    resource = find_resource(resource_id)
+    if resource is None:
+        return False, f"Unknown resource ID: {resource_id}"
+    qty = parse_positive_int(quantity)
+    if qty is None:
+        return False, "Quantity must be a positive whole number."
+    if qty > resource["available"]:
+        return False, (f"Only {resource['available']} {resource['name']}(s) available; "
+                       f"cannot lend {qty}.")
+    resource["available"] -= qty
+    borrow_records.append({"record_id": len(borrow_records) + 1, "fellow_id": fellow_id,
+                           "resource_id": resource_id, "quantity": qty, "returned": 0})
+    return True, f"{fellows[fellow_id]} borrowed {qty} x {resource['name']}."
+
+
+def return_item(fellow_id, resource_id, quantity):
+    if fellow_id not in fellows:
+        return False, f"Unknown fellow ID: {fellow_id}"
+    resource = find_resource(resource_id)
+    if resource is None:
+        return False, f"Unknown resource ID: {resource_id}"
+    qty = parse_positive_int(quantity)
+    if qty is None:
+        return False, "Quantity must be a positive whole number."
+    held = outstanding(fellow_id, resource_id)
+    if qty > held:
+        return False, (f"{fellows[fellow_id]} only has {held} {resource['name']}(s) "
+                       f"on loan; cannot return {qty}.")
+    remaining = qty
+    for rec in borrow_records:  # oldest loans are settled first
+        if remaining == 0:
+            break
+        if rec["fellow_id"] == fellow_id and rec["resource_id"] == resource_id:
+            take = min(rec["quantity"] - rec["returned"], remaining)
+            rec["returned"] += take
+            remaining -= take
+    resource["available"] += qty
+    return True, f"{fellows[fellow_id]} returned {qty} x {resource['name']}."
+
+
+# ---------- search / filter ----------
+def search_by_name(term):
+    term = term.strip().lower()
+    return [r for r in resources if term in r["name"].lower()]
+
+
+def filter_by_category(category):
+    category = category.strip().lower()
+    return [r for r in resources if r["category"].lower() == category]
+
+
+# ---------- reports ----------
+def borrowed_per_resource():
+    """Units currently on loan per resource, computed from the loan records."""
+    return {r["id"]: sum(rec["quantity"] - rec["returned"]
+                         for rec in borrow_records if rec["resource_id"] == r["id"])
+            for r in resources}
+
+
+def generate_report():
+    total_units = sum(r["total"] for r in resources)
+    available_units = sum(r["available"] for r in resources)
+    per_resource = borrowed_per_resource()
+    borrowed_units = sum(per_resource.values())
+    low = [r for r in resources if r["available"] < LOW_STOCK_LIMIT]
+    top = max(per_resource.values(), default=0)
+    leaders = [r for r in resources if per_resource[r["id"]] == top] if top > 0 else []
+
+    print("=== INVENTORY REPORT ===")
+    print(f"Total units:     {total_units}")
+    print(f"Available units: {available_units}")
+    print(f"Borrowed units:  {borrowed_units}")
+    print(f"Low stock (fewer than {LOW_STOCK_LIMIT} available):")
+    if low:
+        for r in low:
+            print(f"  - {r['name']} ({r['available']})")
+    else:
+        print("  - none")
+    if leaders:
+        label = "Most borrowed" if len(leaders) == 1 else "Most borrowed (tie)"
+        print(f"{label}: " + ", ".join(f"{r['name']} ({top})" for r in leaders))
+    else:
+        print("Most borrowed: none (nothing is currently on loan)")
+
+
+# ---------- persistence (bonus) ----------
+def save_data(path=DATA_FILE):
+    with open(path, "w") as f:
+        json.dump({"resources": resources, "borrow_records": borrow_records}, f, indent=2)
+
+
+def load_data(path=DATA_FILE):
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        resources[:] = data["resources"]
+        borrow_records[:] = data["borrow_records"]
+        return True
+    except (ValueError, KeyError, OSError):
+        print("Saved data unreadable; starting with default data.")
+        return False
+
+
+# ---------- menu ----------
+def show(result):
+    ok, message = result
+    print(("  OK: " if ok else "  REJECTED: ") + message)
+
+
+def menu():
+    options = """
+--- Learn2Earn Menu ---
+1. Add resource      5. Search by name
+2. List resources    6. Filter by category
+3. Borrow            7. Report
+4. Return            0. Save and exit"""
+    while True:
+        print(options)
+        choice = input("Choose: ").strip()
+        if choice == "1":
+            show(add_resource(input("ID: "), input("Name: "),
+                              input("Category: "), input("Total units: ")))
+        elif choice == "2":
+            list_resources()
+        elif choice == "3":
+            show(borrow(input("Fellow ID: ").strip(), input("Resource ID: ").strip(),
+                        input("Quantity: ")))
+        elif choice == "4":
+            show(return_item(input("Fellow ID: ").strip(), input("Resource ID: ").strip(),
+                             input("Quantity: ")))
+        elif choice == "5":
+            list_resources(search_by_name(input("Name contains: ")))
+        elif choice == "6":
+            list_resources(filter_by_category(input("Category: ")))
+        elif choice == "7":
+            generate_report()
+        elif choice == "0":
+            save_data()
+            print("Data saved. Goodbye.")
+            break
+        else:
+            print("  Invalid choice. Enter a number from 0 to 7.")
+
+
+def run_demo():
+    print("Step 1: F001 borrows 2 laptops")
+    show(borrow("F001", "R001", 2))
+    print("  Laptop available:", find_resource("R001")["available"])
+    print("Step 2: F002 borrows 3 keyboards")
+    show(borrow("F002", "R002", 3))
+    print("  Keyboard available:", find_resource("R002")["available"])
+    print("Step 3: F001 returns 1 laptop")
+    show(return_item("F001", "R001", 1))
+    print("  Laptop available:", find_resource("R001")["available"])
+    print("Step 4: F003 requests 4 headsets")
+    show(borrow("F003", "R003", 4))
+    print("  Headset available:", find_resource("R003")["available"])
+    print("Step 5: F002 tries to return 4 keyboards")
+    show(return_item("F002", "R002", 4))
+    print("  Keyboard available:", find_resource("R002")["available"])
+    print("Step 6: Search for 'LAPtop'")
+    list_resources(search_by_name("LAPtop"))
+    print("Step 7: Report")
+    generate_report()
+    print("Extra invalid-input test: F001 borrows 'abc' laptops")
+    show(borrow("F001", "R001", "abc"))
+    print("  Laptop available:", find_resource("R001")["available"])
+
+
+if __name__ == "__main__":
+    if "--demo" in sys.argv:
+        run_demo()
+    else:
+        if load_data():
+            print("Loaded saved data.")
+        menu()
+        
+demostration of output and test evidence
+Step 1: F001 borrows 2 laptops
+  OK: Ada borrowed 2 x Laptop.
+  Laptop available: 8
+Step 2: F002 borrows 3 keyboards
+  OK: John borrowed 3 x Keyboard.
+  Keyboard available: 2
+Step 3: F001 returns 1 laptop
+  OK: Ada returned 1 x Laptop.
+  Laptop available: 9
+Step 4: F003 requests 4 headsets
+  REJECTED: Only 3 Headset(s) available; cannot lend 4.
+  Headset available: 3
+Step 5: F002 tries to return 4 keyboards
+  REJECTED: John only has 3 Keyboard(s) on loan; cannot return 4.
+  Keyboard available: 2
+Step 6: Search for 'LAPtop'
+  R001   Laptop       Electronics  total=10  available=9
+Step 7: Report
+=== INVENTORY REPORT ===
+Total units:     18
+Available units: 14
+Borrowed units:  4
+Low stock (fewer than 3 available):
+  - Keyboard (2)
+Most borrowed: Keyboard (3)
+
+test input
+Step 1: F001 borrows 2 laptops
+  OK: Ada borrowed 2 x Laptop.
+  Laptop available: 8
+Step 2: F002 borrows 3 keyboards
+  OK: John borrowed 3 x Keyboard.
+  Keyboard available: 2
+Step 3: F001 returns 1 laptop
+  OK: Ada returned 1 x Laptop.
+  Laptop available: 9
+Step 4: F003 requests 4 headsets
+  REJECTED: Only 3 Headset(s) available; cannot lend 4.
+  Headset available: 3
+Step 5: F002 tries to return 4 keyboards
+  REJECTED: John only has 3 Keyboard(s) on loan; cannot return 4.
+  Keyboard available: 2
+Step 6: Search for 'LAPtop'
+  R001   Laptop       Electronics  total=10  available=9
+Step 7: Report
+=== INVENTORY REPORT ===
+Total units:     18
+Available units: 14
+Borrowed units:  4
+Low stock (fewer than 3 available):
+  - Keyboard (2)
+Most borrowed: Keyboard (3)
+
+project structure explanation
+Overview
+I built a command-line equipment lending program in Python using only the standard library. The program's state is held in three variables: resources (the inventory), fellows (a dictionary of fellow IDs to names) and borrow_records (the loan log). Each feature is a separate function, and a looping menu connects them to the user.
+Functions
+• add_resource() validates the fields, rejects duplicate IDs and non-positive totals, and adds the resource with available equal to total.
+• borrow() checks the fellow ID, resource ID, that the quantity is a positive integer, and that it does not exceed available stock. Only then does it reduce available and log a loan record.
+• return_item() calculates how many units the fellow currently holds and rejects any return larger than that. On success it updates both the loan records and the inventory.
+• search_by_name() lowercases the search term and each resource name, so the search ignores case.
+• generate_report() calculates total, available and borrowed units, lists resources with fewer than 3 available, and finds the most borrowed resource, including ties.
+Helper functions include find_resource(), parse_positive_int(), outstanding(), filter_by_category(), save_data(), load_data() and menu().
+How data is represented
+Inventory is a list of dictionaries, each with id, name, category, total and available. Loans are stored as a list of dictionaries in borrow_records. Each successful borrowing creates one record with fellow_id, resource_id, quantity and returned. A fellow's current loan for a resource is the sum of quantity - returned across their records for that resource. Returns increase returned, starting with the oldest record. The system stays consistent because total = available + units currently borrowed.
+Design decisions
+Logic functions return (ok, message) and do not read input or print, so the menu handles all user interaction. Every function validates first and changes state last, so rejected attempts never alter the data.
+Limitation
+available is stored separately from the loan records, so the same fact exists in two places. If the saved JSON file were edited by hand, or a bug updated only one of them, they could disagree and the reports would be wrong. The program also has no due dates, cannot add fellows from the menu, and holds everything in memory, so it is not safe for several users at once.
+Why return_item checks the fellow's loan, not the stock
+The rule is about what that person holds, not what is on the shelf. John borrowed 3 keyboards, so he can only return up to 3, even though the shelf could hold more. If the check used stock, someone could "return" items they never borrowed and inflate the inventory.
+
+
+Start after your 3-hour coding period. Six questions, 5 marks each. Give explanations and code where requested.
+B1. Trace the code and explain the output *
+What exactly is printed, and why?
+
+items = [2, 4, 6]
+result = []
+for item in items:
+    if item % 4 == 0:
+        continue
+    result.append(item * 2)
+print(result)
+B2. Diagnose and repair a borrowing bug *
+Identify the problem, explain its consequences and rewrite the function correctly.
+
+def borrow(resource, quantity):
+    resource["available"] -= quantity
+    if resource["available"] < 0:
+        return "Not enough stock"
+    return "Success"
+B3. Aggregate transaction data *
+Write a function that returns a dictionary of the total quantity per fellow, without hardcoding results.
+
+transactions = [
+    {"fellow": "Ada", "quantity": 2},
+    {"fellow": "John", "quantity": 4},
+    {"fellow": "Ada", "quantity": 3},
+    {"fellow": "Grace", "quantity": 1},
+    {"fellow": "John", "quantity": 2}
+]
+
+Expected totals: Ada 5; John 6; Grace 1.
+B4. Mutating a list during iteration *
+Will the code always remove every unavailable resource? Explain and provide a reliable correction.
+
+resources = [
+    {"name": "Laptop", "available": 0},
+    {"name": "Mouse", "available": 0},
+    {"name": "Keyboard", "available": 3}
+]
+for resource in resources:
+    if resource["available"] == 0:
+        resources.remove(resource)
+print(resources)
+B5. Reason about simultaneous requests *
+Inventory has five available laptops. Two fellows request four each at nearly the same time. Why can a separate stock check and stock update be unsafe if requests execute concurrently? Describe a method to ensure no more laptops are issued than available. No code required.
+B6. Defend your own implementation *
+Answer all three: (a) What was the most challenging project feature and how did you solve it? (b) Describe a bug you encountered, how you found it and how you fixed it. (c) What would you improve first if 500 fellows used the system, and why?
